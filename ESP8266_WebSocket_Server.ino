@@ -5,11 +5,14 @@
 #include <ESP8266mDNS.h>
 #include <FS.h>
 #include <WebSocketsServer.h>
+#include <WebSocketsClient.h>
+
 
 ESP8266WiFiMulti wifiMulti;       // Create an instance of the ESP8266WiFiMulti class, called 'wifiMulti'
 
 ESP8266WebServer server(80);       // create a web server on port 80
-WebSocketsServer webSocket(443);    // create a websocket server on port 443
+WebSocketsServer webSocket(443);
+
 
 File fsUploadFile;                                    // a File variable to temporarily store the received file
 
@@ -19,19 +22,27 @@ const char *password = "thereisnospoon";   // The password required to connect t
 const char *OTAName = "ESP8266";           // A name and a password for the OTA service
 const char *OTAPassword = "esp8266";
 
-#define LED_RED     15            // specify the pins with an RGB LED connected
-#define LED_GREEN   12
-#define LED_BLUE    13
+           
+#define BUZZED    15
+#define BUZZER    13
+//Debounce//
+unsigned long lastDebounceTime = 0;  // the last time the output pin was toggled
+unsigned long debounceDelay = 50;
+int buttonState;             // the current reading from the input pin
+int lastButtonState = LOW;
 
+//***********************//
 const char* mdnsName = "esp8266"; // Domain name for the mDNS responder
 
 /*__________________________________________________________SETUP__________________________________________________________*/
 
 void setup() {
-  pinMode(LED_RED, OUTPUT);    // the pins with LEDs connected are outputs
-  pinMode(LED_GREEN, OUTPUT);
-  pinMode(LED_BLUE, OUTPUT);
-
+   
+  pinMode(BUZZED, INPUT);
+  pinMode(BUZZER, OUTPUT);
+  
+  digitalWrite(BUZZER, HIGH);
+  
   Serial.begin(115200);        // Start the Serial communication to send messages to the computer
   delay(10);
   Serial.println("\r\n");
@@ -59,17 +70,32 @@ int hue = 0;
 
 void loop() {
   webSocket.loop();                           // constantly check for websocket events
-  server.handleClient();                      // run the server
+//  server.handleClient();                      // run the server
   ArduinoOTA.handle();                        // listen for OTA events
 
-  if(rainbow) {                               // if the rainbow effect is turned on
-    if(millis() > prevMillis + 32) {          
-      if(++hue == 360)                        // Cycle through the color wheel (increment by one degree every 32 ms)
-        hue = 0;
-      setHue(hue);                            // Set the RGB LED to the right color
-      prevMillis = millis();
+    int reading = digitalRead(BUZZED);
+    if (reading!=lastButtonState){
+      lastDebounceTime = millis();
+    }
+ if ((millis() - lastDebounceTime) > debounceDelay) {
+    // whatever the reading is at, it's been there for longer than the debounce
+    // delay, so take it as the actual current state:
+
+    // if the button state has changed:
+    if (reading != buttonState) {
+      buttonState = reading;
+
+      // only toggle the BUZZER if the new button state is HIGH
+      if (buttonState == HIGH) {
+        Serial.printf("BUZZ");
+        webSocket.broadcastTXT("BUZZER");
+        delay(500);
+      }
     }
   }
+     
+    
+    lastButtonState = reading;          
 }
 
 /*__________________________________________________________SETUP_FUNCTIONS__________________________________________________________*/
@@ -107,9 +133,8 @@ void startOTA() { // Start the OTA service
 
   ArduinoOTA.onStart([]() {
     Serial.println("Start");
-    digitalWrite(LED_RED, 0);    // turn off the LEDs
-    digitalWrite(LED_GREEN, 0);
-    digitalWrite(LED_BLUE, 0);
+    
+    digitalWrite(BUZZER, 0);
   });
   ArduinoOTA.onEnd([]() {
     Serial.println("\r\nEnd");
@@ -144,7 +169,7 @@ void startSPIFFS() { // Start the SPIFFS and list all contents
 }
 
 void startWebSocket() { // Start a WebSocket server
-  webSocket.begin();                          // start the websocket server
+  webSocket.begin();                 // start the websocket server
   webSocket.onEvent(webSocketEvent);          // if there's an incomming websocket message, go to function 'webSocketEvent'
   Serial.println("WebSocket server started.");
 }
@@ -236,21 +261,16 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t lenght
       break;
     case WStype_TEXT:                     // if new text data is received
       Serial.printf("[%u] get Text: %s\n", num, payload);
-      if (payload[0] == '#') {            // we get RGB data
-        uint32_t rgb = (uint32_t) strtol((const char *) &payload[1], NULL, 16);   // decode rgb data
-        int r = ((rgb >> 20) & 0x3FF);                     // 10 bits per color, so R: bits 20-29
-        int g = ((rgb >> 10) & 0x3FF);                     // G: bits 10-19
-        int b =          rgb & 0x3FF;                      // B: bits  0-9
-
-        analogWrite(LED_RED,   r);                         // write it to the LED output pins
-        analogWrite(LED_GREEN, g);
-        analogWrite(LED_BLUE,  b);
+      if (payload[0] == 'B') {            // we get RGB data
+          buzz();
+          String message =String("BUZZ Received");
+          webSocket.sendTXT(num, message);
       } else if (payload[0] == 'R') {                      // the browser sends an R when the rainbow effect is enabled
         rainbow = true;
       } else if (payload[0] == 'N') {                      // the browser sends an N when the rainbow effect is disabled
         rainbow = false;
       }
-      break;
+      break;     
   }
 }
 
@@ -275,31 +295,9 @@ String getContentType(String filename) { // determine the filetype of a given fi
   return "text/plain";
 }
 
-void setHue(int hue) { // Set the RGB LED to a given hue (color) (0° = Red, 120° = Green, 240° = Blue)
-  hue %= 360;                   // hue is an angle between 0 and 359°
-  float radH = hue*3.142/180;   // Convert degrees to radians
-  float rf, gf, bf;
+void buzz() {
+  digitalWrite(BUZZER, LOW);
+  delay(500);
+  digitalWrite(BUZZER, HIGH);
   
-  if(hue>=0 && hue<120){        // Convert from HSI color space to RGB              
-    rf = cos(radH*3/4);
-    gf = sin(radH*3/4);
-    bf = 0;
-  } else if(hue>=120 && hue<240){
-    radH -= 2.09439;
-    gf = cos(radH*3/4);
-    bf = sin(radH*3/4);
-    rf = 0;
-  } else if(hue>=240 && hue<360){
-    radH -= 4.188787;
-    bf = cos(radH*3/4);
-    rf = sin(radH*3/4);
-    gf = 0;
-  }
-  int r = rf*rf*1023;
-  int g = gf*gf*1023;
-  int b = bf*bf*1023;
-  
-  analogWrite(LED_RED,   r);    // Write the right color to the LED output pins
-  analogWrite(LED_GREEN, g);
-  analogWrite(LED_BLUE,  b);
 }
